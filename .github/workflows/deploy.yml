@@ -28,18 +28,26 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install selenium beautifulsoup4 matplotlib requests lxml
+          pip install selenium beautifulsoup4 matplotlib requests lxml webdriver-manager
 
-      - name: Install Chrome
+      - name: Install Chrome and ChromeDriver
         run: |
+          # 安装最新版Chrome
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
           sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
+          sudo apt-get install -y google-chrome-stable
+          
+          # 验证安装
+          google-chrome --version
+          
+          # 安装匹配的ChromeDriver
+          pip install chromedriver-autoinstaller
 
       - name: Run crawler
         env:
           PYTHONUNBUFFERED: 1
         run: |
-          export PATH=$PATH:/usr/lib/chromium-browser:/usr/bin
           python crawler.py
 
       - name: Setup Pages
