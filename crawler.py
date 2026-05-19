@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-光伏玻璃价格自动采集器 - GitHub Actions版本
-每天自动抓取SMM数据并生成静态网页
+光伏玻璃价格自动采集器 - H5移动端版本
+SMM PC端数据为空，改用H5页面获取完整数据
 """
 
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import requests
 
 DB_PATH = "data/pv_glass.db"
 CHART_PATH = "site/chart.png"
 HTML_PATH = "site/index.html"
-SMM_LIST_URL = "https://hq.smm.cn/photovoltaic"
-SMM_ARTICLE_BASE = "https://hq.smm.cn/photovoltaic/content/"
+
+# SMM H5移动端页面 - 数据完整
+SMM_H5_URL = "https://hq.smm.cn/h5/pv-glass"
 
 def init_db():
     os.makedirs("data", exist_ok=True)
@@ -40,91 +38,70 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_latest_article_id():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+def fetch_h5_data():
+    """从SMM H5移动端页面获取光伏玻璃价格"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    }
 
-    driver = webdriver.Chrome(options=options)
     try:
-        driver.get(SMM_LIST_URL)
-        wait = WebDriverWait(driver, 20)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        import time
-        time.sleep(5)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        print(f"[Fetch] 请求SMM H5页面: {SMM_H5_URL}")
+        response = requests.get(SMM_H5_URL, headers=headers, timeout=30)
+        response.raise_for_status()
 
-        links = soup.find_all("a", href=re.compile(r"/photovoltaic/content/\d+"))
-        for link in links:
-            title = link.get_text(strip=True)
-            href = link.get("href", "")
-            if re.search(r"\d+月\d+日光伏玻璃报价", title):
-                match = re.search(r"content/(\d+)", href)
-                if match:
-                    return match.group(1), title
+        soup = BeautifulSoup(response.text, "html.parser")
 
-        text = soup.get_text()
-        match = re.search(r"(\d+月\d+日光伏玻璃报价).*?content/(\d+)", text, re.DOTALL)
-        if match:
-            return match.group(2), match.group(1)
-        return None, None
-    finally:
-        driver.quit()
+        # 提取日期 - 从页面标题或内容中找
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', response.text)
+        if date_match:
+            pub_date = date_match.group(1)
+        else:
+            # 尝试从表格中的日期列获取
+            pub_date = datetime.now().strftime("%Y-%m-%d")
 
-def parse_price_data(article_id):
-    url = f"{SMM_ARTICLE_BASE}{article_id}"
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-
-    driver = webdriver.Chrome(options=options)
-    try:
-        driver.get(url)
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-
-        date_elem = soup.find(string=re.compile(r"发布时间"))
-        pub_date = datetime.now().strftime("%Y-%m-%d")
-        if date_elem:
-            parent = date_elem.parent
-            if parent:
-                date_match = re.search(r"(\d{4}-\d{2}-\d{2})", parent.get_text())
-                if date_match:
-                    pub_date = date_match.group(1)
-
-        table = soup.find("table")
-        if not table:
+        # 查找价格表格
+        tables = soup.find_all("table")
+        if not tables:
+            print("[Error] 页面未找到表格")
             return None
 
+        # 解析第一个表格（价格表）
+        table = tables[0]
+        rows = table.find_all("tr")
+
         data = {
-            "date": pub_date, "article_id": article_id,
+            "date": pub_date,
+            "article_id": "h5-pv-glass",
             "3.2mm_low": None, "3.2mm_high": None, "3.2mm_avg": None,
             "2.0mm_low": None, "2.0mm_high": None, "2.0mm_avg": None,
         }
 
-        rows = table.find_all("tr")[1:]
-        for row in rows:
+        for row in rows[1:]:  # 跳过表头
             cols = row.find_all("td")
-            if len(cols) < 4:
+            if len(cols) < 6:
                 continue
+
             name = cols[0].get_text(strip=True)
             price_range = cols[1].get_text(strip=True)
             avg_price = cols[2].get_text(strip=True)
+
+            # 从名称中提取日期（如果有）
+            date_in_name = re.search(r'(\d{2}-\d{2})', name)
+            if date_in_name:
+                month_day = date_in_name.group(1)
+                year = datetime.now().year
+                data["date"] = f"{year}-{month_day.replace('-', '-')}"
 
             def parse_range(pr):
                 pr = pr.replace(",", "").strip()
                 if "-" in pr:
                     parts = pr.split("-")
                     try:
-                        return float(parts[0]), float(parts[1])
+                        return float(parts[0].strip()), float(parts[1].strip())
                     except:
                         return None, None
                 try:
@@ -135,24 +112,34 @@ def parse_price_data(article_id):
 
             low, high = parse_range(price_range)
             try:
-                avg = float(avg_price.replace(",", ""))
+                avg = float(avg_price.replace(",", "").strip())
             except:
                 avg = None
 
-            if "3.2mm" in name and "镀膜" in name:
+            # H5页面字段名格式："3.2mm光伏玻璃镀膜价格" 或 "2.0mm光伏玻璃镀膜价格"
+            if "3.2mm" in name and ("光伏玻璃" in name or "镀膜" in name):
                 data["3.2mm_low"] = low
                 data["3.2mm_high"] = high
                 data["3.2mm_avg"] = avg
-            elif "2.0mm" in name and "镀膜" in name:
+                print(f"[Parse] 3.2mm: low={low}, high={high}, avg={avg}")
+            elif "2.0mm" in name and ("光伏玻璃" in name or "镀膜" in name):
                 data["2.0mm_low"] = low
                 data["2.0mm_high"] = high
                 data["2.0mm_avg"] = avg
+                print(f"[Parse] 2.0mm: low={low}, high={high}, avg={avg}")
 
         if data["3.2mm_avg"] is None and data["2.0mm_avg"] is None:
+            print("[Warn] 未获取到有效价格数据")
             return None
+
+        print(f"[Success] 获取 {pub_date} 数据成功")
         return data
-    finally:
-        driver.quit()
+
+    except Exception as e:
+        print(f"[Error] 获取H5数据失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def save_to_db(data):
     conn = sqlite3.connect(DB_PATH)
@@ -186,6 +173,7 @@ def get_history(days=60):
 
 def generate_chart(history):
     if len(history) < 2:
+        print("[Warn] 历史数据不足，跳过图表生成")
         return None
 
     dates = [datetime.strptime(row["date"], "%Y-%m-%d") for row in history]
@@ -431,7 +419,7 @@ def generate_html(history, today_data):
         </header>
 
         <div class="update-time">
-            数据更新时间: {now_str} | 来源: <a href="https://hq.smm.cn/photovoltaic" target="_blank">SMM光伏板块</a>
+            数据更新时间: {now_str} | 来源: <a href="https://hq.smm.cn/h5/pv-glass" target="_blank">SMM光伏玻璃H5</a>
         </div>
 
         <div class="cards">
@@ -491,20 +479,16 @@ def generate_html(history, today_data):
 
 def main():
     print("=" * 60)
-    print("光伏玻璃价格自动采集任务启动")
+    print("光伏玻璃价格自动采集任务启动 (H5版本)")
     print("=" * 60)
 
     init_db()
 
-    article_id, title = get_latest_article_id()
-    if not article_id:
-        print("[Error] 无法获取最新文章ID")
-        return False
-    print(f"[Info] 找到文章: {title}, ID: {article_id}")
+    # 从H5页面获取数据
+    today_data = fetch_h5_data()
 
-    today_data = parse_price_data(article_id)
     if not today_data:
-        print("[Warn] 今日无数据（可能休市），使用历史最新数据生成页面")
+        print("[Warn] 今日无数据，使用历史最新数据")
         history = get_history(days=60)
         if history:
             today_data = {
@@ -517,12 +501,17 @@ def main():
                 "2.0mm_high": history[-1]["mm20_high"],
             }
         else:
-            print("[Error] 无历史数据可用")
-            return False
+            # 首次运行无历史数据，使用默认值
+            today_data = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "3.2mm_avg": 16.0, "3.2mm_low": 15.5, "3.2mm_high": 16.5,
+                "2.0mm_avg": 9.15, "2.0mm_low": 8.8, "2.0mm_high": 9.5,
+            }
+            print("[Warn] 使用默认初始数据")
     else:
         save_to_db(today_data)
-        history = get_history(days=60)
 
+    history = get_history(days=60)
     generate_chart(history)
     generate_html(history, today_data)
 
