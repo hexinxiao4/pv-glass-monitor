@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-光伏玻璃价格自动采集器 - H5移动端版本
-SMM PC端数据为空，改用H5页面获取完整数据
+光伏玻璃价格自动采集器 - 交互式图表版
+生成含ECharts的HTML，支持缩放、拖动、切换周期
 """
 
 import os
 import re
 import sqlite3
-import time
+import json
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import requests
 
 DB_PATH = "data/pv_glass.db"
-CHART_PATH = "site/chart.png"
 HTML_PATH = "site/index.html"
-
-# SMM H5移动端页面 - 数据完整
 SMM_H5_URL = "https://hq.smm.cn/h5/pv-glass"
 
 def init_db():
@@ -44,8 +39,6 @@ def fetch_h5_data():
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
     }
 
     try:
@@ -55,21 +48,16 @@ def fetch_h5_data():
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # 提取日期 - 从页面标题或内容中找
         date_match = re.search(r'(\d{4}-\d{2}-\d{2})', response.text)
+        pub_date = datetime.now().strftime("%Y-%m-%d")
         if date_match:
             pub_date = date_match.group(1)
-        else:
-            # 尝试从表格中的日期列获取
-            pub_date = datetime.now().strftime("%Y-%m-%d")
 
-        # 查找价格表格
         tables = soup.find_all("table")
         if not tables:
             print("[Error] 页面未找到表格")
             return None
 
-        # 解析第一个表格（价格表）
         table = tables[0]
         rows = table.find_all("tr")
 
@@ -80,7 +68,7 @@ def fetch_h5_data():
             "2.0mm_low": None, "2.0mm_high": None, "2.0mm_avg": None,
         }
 
-        for row in rows[1:]:  # 跳过表头
+        for row in rows[1:]:
             cols = row.find_all("td")
             if len(cols) < 6:
                 continue
@@ -89,12 +77,11 @@ def fetch_h5_data():
             price_range = cols[1].get_text(strip=True)
             avg_price = cols[2].get_text(strip=True)
 
-            # 从名称中提取日期（如果有）
             date_in_name = re.search(r'(\d{2}-\d{2})', name)
             if date_in_name:
                 month_day = date_in_name.group(1)
                 year = datetime.now().year
-                data["date"] = f"{year}-{month_day.replace('-', '-')}"
+                data["date"] = f"{year}-{month_day}"
 
             def parse_range(pr):
                 pr = pr.replace(",", "").strip()
@@ -116,7 +103,6 @@ def fetch_h5_data():
             except:
                 avg = None
 
-            # H5页面字段名格式："3.2mm光伏玻璃镀膜价格" 或 "2.0mm光伏玻璃镀膜价格"
             if "3.2mm" in name and ("光伏玻璃" in name or "镀膜" in name):
                 data["3.2mm_low"] = low
                 data["3.2mm_high"] = high
@@ -157,7 +143,7 @@ def save_to_db(data):
     conn.close()
     print(f"[DB] 已保存 {data['date']} 数据")
 
-def get_history(days=60):
+def get_history(days=90):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -171,69 +157,21 @@ def get_history(days=60):
     conn.close()
     return rows
 
-def generate_chart(history):
-    if len(history) < 2:
-        print("[Warn] 历史数据不足，跳过图表生成")
-        return None
-
-    dates = [datetime.strptime(row["date"], "%Y-%m-%d") for row in history]
-    price_32 = [row["mm32_avg"] for row in history]
-    price_20 = [row["mm20_avg"] for row in history]
-
-    colors = {
-        "32mm": "#6B8E9F", "20mm": "#D4A373",
-        "bg": "#FAFAFA", "grid": "#E8E8E8", "text": "#4A4A4A"
-    }
-
-    fig, ax = plt.subplots(figsize=(14, 7), facecolor=colors["bg"])
-    ax.set_facecolor(colors["bg"])
-
-    ax.plot(dates, price_32, color=colors["32mm"], linewidth=2.5, 
-            marker="o", markersize=4, label="3.2mm单层镀膜", zorder=3)
-    ax.plot(dates, price_20, color=colors["20mm"], linewidth=2.5, 
-            marker="s", markersize=4, label="2.0mm单层镀膜", zorder=3)
-
-    ax.fill_between(dates, price_32, alpha=0.08, color=colors["32mm"])
-    ax.fill_between(dates, price_20, alpha=0.08, color=colors["20mm"])
-
-    latest = history[-1]
-    ax.annotate(f"{latest['mm32_avg']:.2f}", 
-               xy=(dates[-1], price_32[-1]), xytext=(10, 15), textcoords="offset points",
-               fontsize=11, color=colors["32mm"], fontweight="bold",
-               bbox=dict(boxstyle="round,pad=0.4", facecolor="white", 
-                        edgecolor=colors["32mm"], alpha=0.9))
-    ax.annotate(f"{latest['mm20_avg']:.2f}", 
-               xy=(dates[-1], price_20[-1]), xytext=(10, -25), textcoords="offset points",
-               fontsize=11, color=colors["20mm"], fontweight="bold",
-               bbox=dict(boxstyle="round,pad=0.4", facecolor="white", 
-                        edgecolor=colors["20mm"], alpha=0.9))
-
-    ax.set_title("SMM光伏玻璃现货价格趋势 (元/平方米)", 
-               fontsize=16, fontweight="bold", color=colors["text"], pad=20)
-    ax.set_ylabel("价格 (元/m²)", fontsize=12, color=colors["text"])
-
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(dates)//12)))
-    plt.xticks(rotation=45, ha="right", fontsize=10)
-    plt.yticks(fontsize=10)
-
-    ax.grid(True, linestyle="--", alpha=0.4, color=colors["grid"])
-    ax.legend(loc="upper left", framealpha=0.9, fontsize=11)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color(colors["grid"])
-    ax.spines["bottom"].set_color(colors["grid"])
-
-    plt.tight_layout()
-    os.makedirs("site", exist_ok=True)
-    plt.savefig(CHART_PATH, dpi=150, bbox_inches="tight", facecolor=colors["bg"])
-    plt.close()
-    print(f"[Chart] 趋势图已生成: {CHART_PATH}")
-    return CHART_PATH
-
 def generate_html(history, today_data):
     os.makedirs("site", exist_ok=True)
 
+    # 准备JSON数据
+    dates = [row["date"] for row in history]
+    price_32 = [round(row["mm32_avg"], 2) if row["mm32_avg"] else None for row in history]
+    price_20 = [round(row["mm20_avg"], 2) if row["mm20_avg"] else None for row in history]
+
+    chart_data = json.dumps({
+        "dates": dates,
+        "price32": price_32,
+        "price20": price_20
+    }, ensure_ascii=False)
+
+    # 计算涨跌
     change_32 = change_20 = ""
     change_class_32 = change_class_20 = ""
     if len(history) >= 2:
@@ -254,6 +192,7 @@ def generate_html(history, today_data):
             change_20 = f"{arrow} {abs(diff):.2f} ({abs(pct):.2f}%)"
             change_class_20 = f"color:{color}"
 
+    # 历史表格
     table_rows = ""
     for row in reversed(history[-30:]):
         date_str = row["date"]
@@ -270,6 +209,7 @@ def generate_html(history, today_data):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>光伏玻璃价格监控 | SMM日报</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -356,16 +296,43 @@ def generate_html(history, today_data):
             box-shadow: 0 2px 12px rgba(0,0,0,0.06);
             margin-bottom: 30px;
         }}
-        .chart-section h2 {{
-            font-size: 1.3em;
-            color: #2c3e50;
+        .chart-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             margin-bottom: 20px;
             padding-bottom: 10px;
             border-bottom: 2px solid #eee;
+            flex-wrap: wrap;
+            gap: 10px;
         }}
-        .chart-img {{
+        .chart-header h2 {{
+            font-size: 1.3em;
+            color: #2c3e50;
+        }}
+        .time-buttons {{
+            display: flex;
+            gap: 8px;
+        }}
+        .time-btn {{
+            padding: 6px 16px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.2s;
+            color: #666;
+        }}
+        .time-btn:hover {{ background: #f0f0f0; }}
+        .time-btn.active {{
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }}
+        #chart-container {{
             width: 100%;
-            border-radius: 8px;
+            height: 450px;
         }}
         .data-table {{
             background: white;
@@ -408,6 +375,8 @@ def generate_html(history, today_data):
         @media (max-width: 768px) {{
             header h1 {{ font-size: 1.5em; }}
             .price {{ font-size: 2em; }}
+            #chart-container {{ height: 350px; }}
+            .chart-header {{ flex-direction: column; align-items: flex-start; }}
         }}
     </style>
 </head>
@@ -445,8 +414,18 @@ def generate_html(history, today_data):
         </div>
 
         <div class="chart-section">
-            <h2>📈 价格趋势图 (近60日)</h2>
-            <img src="chart.png" alt="光伏玻璃价格趋势" class="chart-img">
+            <div class="chart-header">
+                <h2>📈 价格趋势图</h2>
+                <div class="time-buttons">
+                    <button class="time-btn active" data-days="7">1周</button>
+                    <button class="time-btn" data-days="30">1月</button>
+                    <button class="time-btn" data-days="90">3月</button>
+                    <button class="time-btn" data-days="180">6月</button>
+                    <button class="time-btn" data-days="365">1年</button>
+                    <button class="time-btn" data-days="all">全部</button>
+                </div>
+            </div>
+            <div id="chart-container"></div>
         </div>
 
         <div class="data-table">
@@ -470,16 +449,196 @@ def generate_html(history, today_data):
             <p>GitHub Actions 驱动 | 上次构建: {build_str}</p>
         </div>
     </div>
+
+    <script>
+        // 嵌入历史数据
+        const chartData = {chart_data};
+
+        // 初始化图表
+        const chartDom = document.getElementById('chart-container');
+        const myChart = echarts.init(chartDom);
+
+        // 颜色配置（莫兰迪色系）
+        const colors = {{
+            '32mm': '#6B8E9F',
+            '20mm': '#D4A373',
+            'grid': '#E8E8E8',
+            'text': '#4A4A4A'
+        }};
+
+        function getOption(dates, data32, data20) {{
+            return {{
+                backgroundColor: 'transparent',
+                tooltip: {{
+                    trigger: 'axis',
+                    backgroundColor: 'rgba(255,255,255,0.95)',
+                    borderColor: '#ddd',
+                    borderWidth: 1,
+                    textStyle: {{ color: '#333' }},
+                    axisPointer: {{
+                        type: 'cross',
+                        crossStyle: {{ color: '#999' }}
+                    }}
+                }},
+                legend: {{
+                    data: ['3.2mm单层镀膜', '2.0mm单层镀膜'],
+                    top: 0,
+                    textStyle: {{ color: colors.text }}
+                }},
+                grid: {{
+                    left: '3%',
+                    right: '4%',
+                    bottom: '15%',
+                    top: '12%',
+                    containLabel: true
+                }},
+                toolbox: {{
+                    feature: {{
+                        dataZoom: {{ yAxisIndex: 'none' }},
+                        restore: {{}},
+                        saveAsImage: {{}}
+                    }},
+                    right: 20
+                }},
+                dataZoom: [
+                    {{
+                        type: 'inside',
+                        start: 0,
+                        end: 100
+                    }},
+                    {{
+                        type: 'slider',
+                        start: 0,
+                        end: 100,
+                        height: 30,
+                        bottom: 10,
+                        borderColor: '#ddd',
+                        fillerColor: 'rgba(102, 126, 234, 0.1)',
+                        handleStyle: {{ color: '#667eea' }}
+                    }}
+                ],
+                xAxis: {{
+                    type: 'category',
+                    boundaryGap: false,
+                    data: dates,
+                    axisLine: {{ lineStyle: {{ color: colors.grid }} }},
+                    axisLabel: {{ 
+                        color: colors.text,
+                        rotate: 45,
+                        formatter: function(value) {{
+                            return value.substring(5); // 显示 MM-DD
+                        }}
+                    }}
+                }},
+                yAxis: {{
+                    type: 'value',
+                    name: '价格 (元/m²)',
+                    nameTextStyle: {{ color: colors.text }},
+                    axisLine: {{ show: false }},
+                    axisTick: {{ show: false }},
+                    splitLine: {{ lineStyle: {{ color: colors.grid, type: 'dashed' }} }},
+                    axisLabel: {{ color: colors.text }}
+                }},
+                series: [
+                    {{
+                        name: '3.2mm单层镀膜',
+                        type: 'line',
+                        data: data32,
+                        smooth: true,
+                        symbol: 'circle',
+                        symbolSize: 6,
+                        lineStyle: {{ color: colors['32mm'], width: 2.5 }},
+                        itemStyle: {{ color: colors['32mm'] }},
+                        areaStyle: {{
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                {{ offset: 0, color: 'rgba(107, 142, 159, 0.2)' }},
+                                {{ offset: 1, color: 'rgba(107, 142, 159, 0.02)' }}
+                            ])
+                        }},
+                        markPoint: {{
+                            data: [
+                                {{ type: 'max', name: '最高' }},
+                                {{ type: 'min', name: '最低' }}
+                            ]
+                        }}
+                    }},
+                    {{
+                        name: '2.0mm单层镀膜',
+                        type: 'line',
+                        data: data20,
+                        smooth: true,
+                        symbol: 'circle',
+                        symbolSize: 6,
+                        lineStyle: {{ color: colors['20mm'], width: 2.5 }},
+                        itemStyle: {{ color: colors['20mm'] }},
+                        areaStyle: {{
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                {{ offset: 0, color: 'rgba(212, 163, 115, 0.2)' }},
+                                {{ offset: 1, color: 'rgba(212, 163, 115, 0.02)' }}
+                            ])
+                        }},
+                        markPoint: {{
+                            data: [
+                                {{ type: 'max', name: '最高' }},
+                                {{ type: 'min', name: '最低' }}
+                            ]
+                        }}
+                    }}
+                ]
+            }};
+        }}
+
+        // 根据天数筛选数据
+        function filterData(days) {{
+            const allDates = chartData.dates;
+            const all32 = chartData.price32;
+            const all20 = chartData.price20;
+
+            if (days === 'all' || days >= allDates.length) {{
+                return {{ dates: allDates, p32: all32, p20: all20 }};
+            }}
+
+            const start = Math.max(0, allDates.length - days);
+            return {{
+                dates: allDates.slice(start),
+                p32: all32.slice(start),
+                p20: all20.slice(start)
+            }};
+        }}
+
+        // 渲染图表
+        function renderChart(days) {{
+            const filtered = filterData(days);
+            const option = getOption(filtered.dates, filtered.p32, filtered.p20);
+            myChart.setOption(option, true);
+        }}
+
+        // 时间按钮事件
+        document.querySelectorAll('.time-btn').forEach(btn => {{
+            btn.addEventListener('click', function() {{
+                document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                const days = this.dataset.days === 'all' ? 'all' : parseInt(this.dataset.days);
+                renderChart(days);
+            }});
+        }});
+
+        // 初始渲染（显示全部数据）
+        renderChart('all');
+
+        // 响应式
+        window.addEventListener('resize', () => myChart.resize());
+    </script>
 </body>
 </html>"""
 
     with open(HTML_PATH, "w", encoding="utf-8") as f:
         f.write(html_content)
-    print(f"[HTML] 网页已生成: {HTML_PATH}")
+    print(f"[HTML] 交互式网页已生成: {HTML_PATH}")
 
 def main():
     print("=" * 60)
-    print("光伏玻璃价格自动采集任务启动 (H5版本)")
+    print("光伏玻璃价格自动采集任务启动 (交互式图表版)")
     print("=" * 60)
 
     init_db()
@@ -489,7 +648,7 @@ def main():
 
     if not today_data:
         print("[Warn] 今日无数据，使用历史最新数据")
-        history = get_history(days=60)
+        history = get_history(days=90)
         if history:
             today_data = {
                 "date": history[-1]["date"],
@@ -511,11 +670,23 @@ def main():
     else:
         save_to_db(today_data)
 
-    history = get_history(days=60)
-    generate_chart(history)
+    # 获取90天历史数据用于图表
+    history = get_history(days=90)
+
+    # 生成交互式网页
     generate_html(history, today_data)
 
-    print("[Done] 任务完成，网页已生成到 site/ 目录")
+    # 最终检查
+    print("
+[Check] 文件检查:")
+    if os.path.exists(HTML_PATH):
+        size = os.path.getsize(HTML_PATH)
+        print(f"  ✅ {HTML_PATH} ({size:,} bytes)")
+    else:
+        print(f"  ❌ {HTML_PATH} 不存在")
+
+    print("
+[Done] 任务完成，交互式网页已生成")
     return True
 
 if __name__ == "__main__":
